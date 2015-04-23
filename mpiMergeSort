@@ -1,0 +1,230 @@
+/**
+ * Author: Chris McDonald
+ * Course: CS452
+ * Program: Parallel Merge Sort
+ *
+ * This program parallelizes the Sequential Merge Sort Algorithm in a non-embarrassingly parallel way.
+ * The embarrassingly parallel approach stripes or chunks the original array, each processor performs merge 
+ * sort on their given section and then the sections are reduced to one array.
+ * The embarrassingly parallel approach runs in O(n) time with O(nlog(n)) work.
+ *
+ * This program parallelizes the Merge Sort Algorithm by implementing a Parallel Merge Algorithm which uses a Ranking Algorithm.
+ * Both the Parallel Merge Algorithm and the Rank Algorithm are parallelized by striping.
+ * The Parallel Merge Algorithm merges each pair of partitioned 'blocks' for each pair of sub arrays.
+ * The Merge Sort Algorithm begins with a base case of 4, where the sub arrays are of size 4 and sorted,
+ * and then recurses up by size*2 intervals until the size = the given array size (n).
+ * This program runs in O(log(n)) time with O(n) work.
+ */
+
+#include <algorithm> // Uses 'sort(array[FIRST], array[LAST])'
+#include <fstream>
+#include <math.h>
+#include <mpi.h> // Message Passing Interface
+
+using namespace std;
+
+void Merge_Sort(int*, int*, int, int, int);
+void Parallel_Merge(int*, int*, int*, int,int,int);
+int Rank(int, int, int*);
+void Seq_Merge(int*, int, int, int*, int, int, int*, int, int);
+
+int main (int argc, char * argv[]) {
+    
+    // "Parallel" variables
+    int my_rank;			// My CPU number for this process
+    int p;					// Number of CPUs
+    
+    // "Serial" variables
+    int n;                  // Size of the original array
+    
+    // Start MPI!
+    MPI_Init(&argc, &argv);
+    
+    // Find out my rank!
+    MPI_Comm_rank(MPI_COMM_WORLD, &my_rank);
+    
+    // Find out the number of processes!
+    MPI_Comm_size(MPI_COMM_WORLD, &p);
+    
+    ifstream file ("pmergeTest64.txt"); // Reads from the given file
+    
+    file >> n; // The number of integers
+    
+    int* original_array = new int [n]; // Stores the original array of integers from the given file
+    int* sorted_array = new int [n]; // Stores the array of integers once the Merge Sort Algorithm has been performed
+    
+    // Fill the array with the integers from the given file
+    for (int i =0; i<n; i++)
+    {
+        file >> original_array[i];
+        sorted_array[i]=0;
+    }
+    
+    file.close(); // Close the file
+    
+    Merge_Sort(original_array, sorted_array, n, my_rank, p); // Perform the Merge Sort Algorithm on 'original_array'
+    
+    // Display the original unsorted array and the newly sorted array
+    if(my_rank==0){
+        
+        cout << "Unsorted: " << endl;
+        for(int i=0; i<n; i++){
+            cout << original_array[i] << " ";
+        }
+        cout << "\n";
+        
+        cout << "Sorted:" <<endl;
+        for(int i=0; i<n; i++){
+            cout << sorted_array[i] << " ";
+        }
+        cout << "\n";
+        
+    }
+    
+    // "Free" allocated memory
+    delete [] original_array;
+    delete [] sorted_array;
+    
+    // Shut down MPI!
+    MPI_Finalize();
+    
+    return 0;
+}
+
+/**
+ * Function to perform the Merge Sort Algorithm recursively
+ */
+void Merge_Sort(int * array_1, int * array_2, int size, int my_rank, int p)
+{
+    
+    if(size == 4){
+        for(int i=0; i<size; i++){
+            array_2[i] = array_1[i];
+        }
+        sort(array_2, array_2 + size);
+    }
+    else{
+        int * array_temp = new int[size];
+        for(int i=0; i<size; i++){
+            array_temp[i]=0;
+        }
+        Merge_Sort(&array_1[0], &array_temp[0], size/2, my_rank, p);
+        Merge_Sort(&array_1[size/2], &array_temp[size/2], size-size/2, my_rank, p);
+        Parallel_Merge(&array_temp[0], &array_temp[size/2], &array_2[0], size, my_rank, p);
+    }
+}
+
+/**
+ * Function to perform the Parallel Merge Algorithm
+ */
+void Parallel_Merge(int * sub_1, int * sub_2, int * array_final, int size, int my_rank, int p)
+{
+    int local_start = my_rank; // Used for striping
+    
+    // Compute log base 2 of 'size'
+    int logSize = log2(size/2);
+    int sub_size = ceil((size/2)/(logSize));
+    
+    int * local_sub_1_ranks = new int[2*sub_size+2]; // Local ranks of 'sub_1' in 'sub_2'
+    int * local_sub_2_ranks = new int[2*sub_size+2]; // Local ranks of 'sub_2' in 'sub_1'
+    int * sub_1_ranks = new int[2*sub_size+2]; // Ranks of 'sub_1' in 'sub_2' + computed positions
+    int * sub_2_ranks = new int[2*sub_size+2]; // Ranks of 'sub_2' in 'sub_1' + computed positions
+    int * array_temp = new int[size]; // Stores the local sorted sub arrays
+   
+    // Initialize
+    for(int i=0; i < 2*sub_size+2; i++){
+        local_sub_1_ranks[i] = 0;
+        local_sub_2_ranks[i] = 0;
+        sub_1_ranks[i] = 0;
+        sub_2_ranks[i] = 0;
+    }
+    for(int i=0; i < size; i++){
+        array_temp[i] = 0;
+    }
+    
+    // Parallel Rank
+    
+    // Fill with the 'randomly selected' or computed positions
+    for(int i = local_start; i < sub_size; i+=p){
+        local_sub_1_ranks[i] = 1+i*logSize;
+        local_sub_2_ranks[i] = 1+i*logSize;
+    }
+    // Fill with the computed ranks
+    for(int i = local_start; i < sub_size; i+=p){
+        local_sub_1_ranks[i+sub_size] = Rank(sub_2[0+i*logSize], size/2, sub_1);
+        local_sub_2_ranks[i+sub_size] = Rank(sub_1[0+i*logSize], size/2, sub_2);
+    }
+    
+    // Reduce the local computed ranks into 'sub_1_ranks'
+    MPI_Allreduce(local_sub_1_ranks, sub_1_ranks, 2*sub_size+2, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    
+    // Reduce the local computed ranks into 'sub_2_ranks'
+    MPI_Allreduce(local_sub_2_ranks, sub_2_ranks, 2*sub_size+2, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    
+    // End Parallel Rank
+    
+    // Handles the problem of the size of the starting and ending 'blocks'
+    sub_1_ranks[2*sub_size] = 0;
+    sub_2_ranks[2*sub_size] = 0;
+    sub_1_ranks[2*sub_size+1] = size/2;
+    sub_2_ranks[2*sub_size+1] = size/2;
+    
+    // Sort the arrays storing the ranks
+    sort(sub_1_ranks, sub_1_ranks + 2*sub_size+1);
+    sort(sub_2_ranks, sub_2_ranks + 2*sub_size+1);
+    
+    // Perform the Sequential Merge Algorithm on each pair of partitioned 'blocks' for each pair of sub arrays
+    for(int i = local_start; i < 2*sub_size+1; i+=p){
+        Seq_Merge(sub_1, sub_1_ranks[i], sub_1_ranks[i+1], sub_2, sub_2_ranks[i], sub_2_ranks[i+1], array_temp, sub_1_ranks[i] + sub_2_ranks[i], sub_1_ranks[i+1] + sub_2_ranks[i+1]);
+    }
+    
+    // Reduce the local 'array_temp' into 'array_final'
+    MPI_Allreduce(array_temp, array_final, size, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+    
+    // "Free" allocated memory
+    delete [] local_sub_1_ranks;
+    delete [] local_sub_2_ranks;
+    delete [] sub_1_ranks;
+    delete [] sub_2_ranks;
+}
+
+/**
+ * Function to perform the Rank Algorithm to find the position of 'value' in the given array
+ */
+int Rank(int value, int size, int * array)
+{
+    if(size == 1){
+        if(value < array[0]){
+            return 0;
+        }
+        else{
+            return 1;
+        }
+    }
+    else{
+        if(value < array[size/2]){
+            return Rank(value, size/2, array);
+        }
+        else{
+            return size/2 + Rank(value, size/2, &array[size/2]);
+        }
+    }
+}
+
+/**
+ * Function to perform the Sequential Merge Algorithm
+ */
+void Seq_Merge(int * array_1, int left_1, int right_1, int * array_2, int left_2, int right_2, int * array_final, int left_final, int right_final)
+{
+    int left_one = left_1;
+    int left_two = left_2;
+    
+    for(int i = left_final; i < right_final; i++){
+        if(left_one < right_1 && ((left_two == right_2) || (array_1[left_one] < array_2[left_two]))){
+            array_final[i] = array_1[left_one++];
+        }
+        else{
+            array_final[i] = array_2[left_two++];
+        }
+    }
+}
