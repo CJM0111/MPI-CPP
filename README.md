@@ -1,2 +1,2 @@
 # C++ MPI
-Random projects implemented with C++ using the MPI library
+Random projects implemented using C++ and the MPI library
